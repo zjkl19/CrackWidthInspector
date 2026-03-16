@@ -31,6 +31,11 @@ class ProcessingResult:
     samples_csv: Optional[Path]
     skeleton_points: int
     sampled_points: int
+    max_width_px: float
+    max_width_mm: float
+    mean_width_px: float
+    mean_width_mm: float
+    main_path_length_px: float
 
 
 class CropLayer(cv2.dnn.Layer):
@@ -409,6 +414,18 @@ def sample_along_path(path, width_map, scale, sample_count):
     return samples
 
 
+def path_length(path):
+    if len(path) < 2:
+        return 0.0
+
+    total = 0.0
+    for idx in range(1, len(path)):
+        y1, x1 = path[idx - 1]
+        y2, x2 = path[idx]
+        total += math.hypot(x2 - x1, y2 - y1)
+    return total
+
+
 def save_csv(path: Path, rows, header):
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [",".join(header)]
@@ -499,6 +516,14 @@ def process_image(
     cv2.imwrite(str(overlay_path), draw_overlay(image, mask, skeleton, samples, scale))
 
     ys, xs = np.where(skeleton > 0)
+    skeleton_widths_px = [float(width_map[y, x]) for y, x in zip(ys, xs)]
+    max_width_px = max(skeleton_widths_px, default=0.0)
+    mean_width_px = (
+        float(sum(skeleton_widths_px) / len(skeleton_widths_px))
+        if skeleton_widths_px
+        else 0.0
+    )
+    main_path_length = path_length(path_coords)
     width_rows = []
     for y, x in zip(ys, xs):
         width_px = float(width_map[y, x])
@@ -578,6 +603,11 @@ def process_image(
         samples_csv=samples_csv,
         skeleton_points=len(xs),
         sampled_points=len(samples),
+        max_width_px=max_width_px,
+        max_width_mm=max_width_px * scale,
+        mean_width_px=mean_width_px,
+        mean_width_mm=mean_width_px * scale,
+        main_path_length_px=main_path_length,
     )
 
 
