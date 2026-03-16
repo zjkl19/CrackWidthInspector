@@ -115,6 +115,21 @@ GUI 使用流程：
 dist\CrackWidthInspector\
 ```
 
+### 整理发布包
+
+```powershell
+.\build_release.ps1
+```
+
+执行后会生成：
+
+```text
+release\CrackWidthInspector-v1.0.0-win64\
+release\CrackWidthInspector-v1.0.0-win64.zip
+```
+
+发布包中包含主程序、客户使用说明、技术文档、示例图片和空的输出目录。
+
 ### 注意事项
 
 - `mm` 结果依赖 `scale` 参数，若未做标定，则毫米值仅作估算。
@@ -188,6 +203,21 @@ python .\crack_width_inspector_gui.py
 ```
 
 The packaged directory-mode application will be created in `dist\CrackWidthInspector\`.
+
+### Build Release Package
+
+```powershell
+.\build_release.ps1
+```
+
+This will generate:
+
+```text
+release\CrackWidthInspector-v1.0.0-win64\
+release\CrackWidthInspector-v1.0.0-win64.zip
+```
+
+The release package includes the application, customer quick-start guide, technical documents, sample images, and an empty output folder.
 
 ### Notes
 

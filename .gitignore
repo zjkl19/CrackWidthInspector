@@ -9,4 +9,5 @@ build/
 dist/
 outputs/
 outputs_probe/
+release/
 *.log
