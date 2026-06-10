@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -38,6 +39,7 @@ from manual_point_review import (
     DEFAULT_POINT_CONFIG_CSV,
     DEFAULT_SUMMARY,
     POINT_FIELDS,
+    MANUAL_ACTUAL_OVERRIDE_SOURCE,
     MANUAL_CONFIRMED_SOURCE,
     MANUAL_BATCH_ALL_IMAGES_SOURCE,
     MANUAL_BATCH_CURRENT_IMAGE_SOURCE,
@@ -54,8 +56,11 @@ from manual_point_review import (
     is_skipped,
     normalize_point_rows,
     read_csv_rows,
+    actual_position_pct,
+    round_if_number,
     sensor_key,
     to_float,
+    valid_profile_rows,
     write_point_config,
     write_csv_rows,
 )
@@ -78,6 +83,36 @@ def ui_font(size: int = 16):
 def app_icon_path() -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base / "assets" / "crack_width_manual_review.ico"
+
+
+AUTO_DERIVED_MANUAL_SOURCES = {
+    "",
+    MANUAL_PREFILL_SOURCE,
+    MANUAL_BATCH_CURRENT_IMAGE_SOURCE,
+    MANUAL_BATCH_SELECTED_IMAGES_SOURCE,
+    MANUAL_BATCH_ALL_IMAGES_SOURCE,
+}
+
+
+ORIGINAL_ACTUAL_FIELD_MAP = [
+    ("actual_position_pct", "original_actual_position_pct"),
+    ("x_px", "original_x_px"),
+    ("y_px", "original_y_px"),
+    ("left_x_px", "original_left_x_px"),
+    ("left_y_px", "original_left_y_px"),
+    ("right_x_px", "original_right_x_px"),
+    ("right_y_px", "original_right_y_px"),
+    ("auto_width_mm", "original_auto_width_mm"),
+    ("auto_width_px", "original_auto_width_px"),
+    ("mask_width_mm", "original_mask_width_mm"),
+    ("contrast", "original_contrast"),
+    ("threshold", "original_threshold"),
+    ("selection_reason", "original_selection_reason"),
+]
+
+
+def is_auto_derived_manual_source(source: Any) -> bool:
+    return str(source or "").strip() in AUTO_DERIVED_MANUAL_SOURCES
 
 
 class ImageLabel(QLabel):
@@ -159,6 +194,8 @@ class ManualPointReviewWindow(QMainWindow):
         self.first_unfilled_button = QPushButton("首个未填")
         self.config_mode_button = QPushButton("设置测点")
         self.config_mode_button.setCheckable(True)
+        self.actual_mode_button = QPushButton("调整实际点")
+        self.actual_mode_button.setCheckable(True)
         self.save_config_button = QPushButton("保存测点配置")
         self.rebuild_by_config_button = QPushButton("按配置重建CSV")
         for button in [
@@ -170,6 +207,7 @@ class ManualPointReviewWindow(QMainWindow):
             self.next_image_button,
             self.first_unfilled_button,
             self.config_mode_button,
+            self.actual_mode_button,
             self.save_config_button,
             self.rebuild_by_config_button,
         ]:
@@ -235,6 +273,7 @@ class ManualPointReviewWindow(QMainWindow):
         action_row2 = QHBoxLayout()
         self.save_current_button = QPushButton("保存当前")
         self.skip_button = QPushButton("跳过测点")
+        self.restore_actual_button = QPushButton("恢复自动点")
         self.delete_image_button = QPushButton("删除当前图片")
         self.confirm_current_image_button = QPushButton("确认当前图")
         self.confirm_selected_images_button = QPushButton("确认选中图")
@@ -243,6 +282,7 @@ class ManualPointReviewWindow(QMainWindow):
         self.next_point_button = QPushButton("下一测点")
         action_row1.addWidget(self.save_current_button)
         action_row1.addWidget(self.skip_button)
+        action_row1.addWidget(self.restore_actual_button)
         action_row1.addWidget(self.delete_image_button)
         action_row2.addWidget(self.confirm_current_image_button)
         action_row2.addWidget(self.confirm_selected_images_button)
@@ -276,10 +316,12 @@ class ManualPointReviewWindow(QMainWindow):
         self.next_image_button.clicked.connect(self.next_image)
         self.first_unfilled_button.clicked.connect(self.first_unfilled)
         self.config_mode_button.toggled.connect(self.on_config_mode_toggled)
+        self.actual_mode_button.toggled.connect(self.on_actual_mode_toggled)
         self.save_config_button.clicked.connect(self.save_point_config)
         self.rebuild_by_config_button.clicked.connect(self.rebuild_points_by_config)
         self.save_current_button.clicked.connect(self.save_current)
         self.skip_button.clicked.connect(self.skip_current)
+        self.restore_actual_button.clicked.connect(self.restore_current_actual_point)
         self.delete_image_button.clicked.connect(self.toggle_delete_current_image)
         self.confirm_current_image_button.clicked.connect(self.confirm_current_image)
         self.confirm_selected_images_button.clicked.connect(self.confirm_selected_images)
@@ -350,6 +392,83 @@ class ManualPointReviewWindow(QMainWindow):
         if not target_row.get("note"):
             target_row["note"] = "GUI人工设置"
         self.config_dirty = True
+
+    def store_original_actual_point(self, row: dict[str, Any]) -> None:
+        if row.get("actual_override_source") == MANUAL_ACTUAL_OVERRIDE_SOURCE:
+            return
+        for current_field, original_field in ORIGINAL_ACTUAL_FIELD_MAP:
+            row[original_field] = row.get(current_field, "")
+
+    def nearest_profile_point(self, x_px: float, y_px: float) -> tuple[dict[str, Any] | None, list[dict[str, str]], float | None, str]:
+        row = self.current_row()
+        profile_path = Path(str(row.get("profile_csv_path") or ""))
+        if not profile_path.exists():
+            return None, [], None, f"找不到剖面文件：{profile_path}"
+        try:
+            raw_rows = read_csv_rows(profile_path)
+        except Exception as exc:
+            return None, [], None, f"剖面文件读取失败：{exc}"
+        candidates = valid_profile_rows(raw_rows)
+        if not candidates:
+            return None, raw_rows, None, "剖面文件中没有可用测宽点。"
+        nearest = min(
+            candidates,
+            key=lambda item: (
+                (float(item["_x"]) - x_px) ** 2 + (float(item["_y"]) - y_px) ** 2,
+                float(item["_distance_px"]),
+            ),
+        )
+        distance = math.hypot(float(nearest["_x"]) - x_px, float(nearest["_y"]) - y_px)
+        return nearest, raw_rows, distance, ""
+
+    def apply_actual_profile_point(self, row: dict[str, Any], profile_point: dict[str, Any], profile_rows: list[dict[str, str]], distance_px: float) -> None:
+        self.store_original_actual_point(row)
+        row["actual_position_pct"] = round_if_number(actual_position_pct(profile_point, profile_rows), 3)
+        row["x_px"] = round_if_number(profile_point.get("_x"), 3)
+        row["y_px"] = round_if_number(profile_point.get("_y"), 3)
+        row["left_x_px"] = round_if_number(to_float(profile_point.get("left_x")), 3)
+        row["left_y_px"] = round_if_number(to_float(profile_point.get("left_y")), 3)
+        row["right_x_px"] = round_if_number(to_float(profile_point.get("right_x")), 3)
+        row["right_y_px"] = round_if_number(to_float(profile_point.get("right_y")), 3)
+        row["auto_width_mm"] = round_if_number(profile_point.get("_profile_width_mm"), 6)
+        row["auto_width_px"] = round_if_number(to_float(profile_point.get("profile_width_px")), 6)
+        row["mask_width_mm"] = round_if_number(to_float(profile_point.get("mask_width_mm")), 6)
+        row["contrast"] = round_if_number(to_float(profile_point.get("contrast")), 6)
+        row["threshold"] = round_if_number(to_float(profile_point.get("threshold")), 6)
+        row["selection_reason"] = MANUAL_ACTUAL_OVERRIDE_SOURCE
+        row["actual_override_source"] = MANUAL_ACTUAL_OVERRIDE_SOURCE
+        row["actual_override_distance_px"] = round_if_number(distance_px, 3)
+        row["marker_contaminated"] = "0"
+        row["review_usable"] = "1"
+        row["exclude_reason"] = ""
+        if is_auto_derived_manual_source(row.get("manual_source")):
+            row["manual_width_mm"] = format_manual_width(row.get("auto_width_mm"))
+            row["manual_source"] = MANUAL_PREFILL_SOURCE
+        row["review_status"] = "pending"
+
+    def restore_current_actual_point(self) -> None:
+        row = self.current_row()
+        if row.get("actual_override_source") != MANUAL_ACTUAL_OVERRIDE_SOURCE:
+            self.status_label.setText("当前测点没有人工调整实际点，无需恢复。")
+            return
+        restored = False
+        for current_field, original_field in ORIGINAL_ACTUAL_FIELD_MAP:
+            if row.get(original_field, "") != "":
+                row[current_field] = row.get(original_field, "")
+                restored = True
+            row[original_field] = ""
+        if not restored:
+            self.status_label.setText("当前测点缺少原自动点备份，无法恢复。")
+            return
+        row["actual_override_source"] = ""
+        row["actual_override_distance_px"] = ""
+        if is_auto_derived_manual_source(row.get("manual_source")):
+            row["manual_width_mm"] = format_manual_width(row.get("auto_width_mm"))
+            row["manual_source"] = MANUAL_PREFILL_SOURCE
+        row["review_status"] = "pending"
+        self.dirty = True
+        self.refresh_all()
+        self.status_label.setText("已恢复当前测点的原自动实际位置；点击“保存 CSV”写入文件。")
 
     def rebuild_index(self) -> None:
         self.image_ids = sorted(
@@ -682,7 +801,12 @@ class ManualPointReviewWindow(QMainWindow):
         self.loaded_manual_value = str(row.get("manual_width_mm") or "")
         self.loaded_status_value = self.status_combo.currentText()
         self.delete_image_button.setText("恢复当前图片" if deleted else "删除当前图片")
+        has_actual_override = row.get("actual_override_source") == MANUAL_ACTUAL_OVERRIDE_SOURCE
+        self.restore_actual_button.setEnabled(has_actual_override)
         delete_text = f"\n删除原因：{row.get('delete_reason')}" if deleted and row.get("delete_reason") else ""
+        override_text = ""
+        if has_actual_override:
+            override_text = f"\n实际点调整：人工吸附覆盖，吸附距离 {row.get('actual_override_distance_px', '')} px"
         self.meta_label.setText(
             f"图像 {self.image_pos + 1}/{len(self.image_ids)}，测点 {self.point_pos + 1}/{len(indices)}\n"
             f"构件：{row.get('device_name')}\n"
@@ -690,6 +814,7 @@ class ManualPointReviewWindow(QMainWindow):
             f"文件：{row.get('filename')}\n"
             f"状态：{'已软删除' if deleted else '可复核'}{delete_text}\n"
             f"选点：{row.get('selection_reason', '')}\n"
+            f"{override_text}\n"
             f"取点来源：{row.get('point_config_source', '')}\n"
             f"人工值来源：{row.get('manual_source', '')}\n"
             f"配置文件：{self.config_path.name}"
@@ -781,9 +906,27 @@ class ManualPointReviewWindow(QMainWindow):
 
     def on_config_mode_toggled(self, checked: bool) -> None:
         if checked:
+            if self.actual_mode_button.isChecked():
+                self.actual_mode_button.blockSignals(True)
+                self.actual_mode_button.setChecked(False)
+                self.actual_mode_button.blockSignals(False)
             self.status_label.setText("测点设置模式：先在右侧表格选择 P1/P2/P3，再点击图像中的固定目标点位置。点击后不会自动切换测点。")
         else:
             self.status_label.setText("已退出测点设置模式。")
+        self.draw_image()
+
+    def on_actual_mode_toggled(self, checked: bool) -> None:
+        if checked:
+            if self.config_mode_button.isChecked():
+                self.config_mode_button.blockSignals(True)
+                self.config_mode_button.setChecked(False)
+                self.config_mode_button.blockSignals(False)
+            row = self.current_row()
+            self.status_label.setText(
+                f"实际点调整模式：当前为 P{row.get('point_order')}。请点击裂缝上希望测宽的位置，程序会吸附到最近有效法向剖面。"
+            )
+        else:
+            self.status_label.setText("已退出实际点调整模式。")
         self.draw_image()
 
     def display_to_image_coords(self, display_x: float, display_y: float) -> tuple[float, float] | None:
@@ -807,13 +950,30 @@ class ManualPointReviewWindow(QMainWindow):
         )
 
     def on_image_clicked(self, display_x: float, display_y: float) -> None:
-        if not self.config_mode_button.isChecked():
+        if not self.config_mode_button.isChecked() and not self.actual_mode_button.isChecked():
             return
         coords = self.display_to_image_coords(display_x, display_y)
         if coords is None:
-            self.status_label.setText("点击位置不在图像范围内，未更新目标点。")
+            self.status_label.setText("点击位置不在图像范围内，未更新测点。")
             return
         x_px, y_px = coords
+        if self.actual_mode_button.isChecked():
+            row = self.current_row()
+            profile_point, profile_rows, distance_px, error = self.nearest_profile_point(x_px, y_px)
+            if error or profile_point is None or distance_px is None:
+                self.status_label.setText(error or "未找到可吸附的实际测点。")
+                return
+            self.apply_actual_profile_point(row, profile_point, profile_rows, distance_px)
+            self.dirty = True
+            self.refresh_all()
+            warning = "；吸附距离较远，请复核" if distance_px > 120 else ""
+            self.status_label.setText(
+                f"已调整 {row.get('point_id')} 实际测点："
+                f"x={to_float(row.get('x_px')):.1f}, y={to_float(row.get('y_px')):.1f}, "
+                f"宽度={row.get('auto_width_mm')} mm，吸附距离={distance_px:.1f} px{warning}。"
+                " 点击“保存 CSV”写入文件。"
+            )
+            return
         row = self.current_row()
         point_order = int(to_float(row.get("point_order")) or (self.point_pos + 1))
         self.upsert_current_sensor_config(point_order, x_px, y_px)
@@ -899,7 +1059,7 @@ class ManualPointReviewWindow(QMainWindow):
         if self.image_deleted():
             draw.rectangle((0, 0, 210, 30), fill="#b00020")
             draw.text((10, 8), "SOFT DELETED", fill="white", font=font)
-        draw.rectangle((6, 6, 310, 62), fill=(255, 255, 255), outline="#d0d0d0")
+        draw.rectangle((6, 6, 330, 88), fill=(255, 255, 255), outline="#d0d0d0")
         draw.line((18, 24, 42, 24), fill="#d62828", width=4)
         draw.text((50, 16), "程序实际法向测宽短线", fill="#222222", font=font)
         target_color = "#ffe600"
@@ -909,6 +1069,8 @@ class ManualPointReviewWindow(QMainWindow):
         draw.line((24, 42, 24, 58), fill=target_color, width=3)
         draw.line((16, 50, 32, 50), fill=target_color, width=3)
         draw.text((50, 42), "人工固定目标点", fill="#222222", font=font)
+        draw.line((18, 76, 42, 76), fill="#f77f00", width=4)
+        draw.text((50, 68), "人工调整实际测点", fill="#222222", font=font)
         selected_order = int(to_float(row.get("point_order")) or 0)
         for config in self.current_sensor_config_rows():
             tx = to_float(config.get("target_x_px"))
@@ -945,13 +1107,19 @@ class ManualPointReviewWindow(QMainWindow):
                 continue
             lx, ly, rx, ry, x, y = [float(value) * scale for value in coords]
             line_width = 5 if idx == current_idx else 3
-            line_color = "#d62828" if idx == current_idx else "#ef6f6c"
-            center_color = "#00a6d6" if idx == current_idx else "#7ccce3"
+            overridden = point.get("actual_override_source") == MANUAL_ACTUAL_OVERRIDE_SOURCE
+            if overridden:
+                line_color = "#f77f00" if idx == current_idx else "#fcbf49"
+                center_color = "#00d1ff" if idx == current_idx else "#9be8ff"
+            else:
+                line_color = "#d62828" if idx == current_idx else "#ef6f6c"
+                center_color = "#00a6d6" if idx == current_idx else "#7ccce3"
             draw.line((lx, ly, rx, ry), fill=line_color, width=line_width)
             radius = 6 if idx == current_idx else 4
             draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=center_color, outline="black", width=2)
             if idx == current_idx:
-                draw.text((x + 10, y + 6), f"P{order}实际", fill=line_color, font=font)
+                label = f"P{order}实际调整" if overridden else f"P{order}实际"
+                draw.text((x + 10, y + 6), label, fill=line_color, font=font, stroke_width=2, stroke_fill="white")
         pixmap = QPixmap.fromImage(ImageQt(display))
         self.image_label.setPixmap(pixmap)
         self.image_label.resize(pixmap.size())

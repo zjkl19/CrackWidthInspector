@@ -28,6 +28,7 @@ MANUAL_CONFIRMED_SOURCE = "manual_confirmed"
 MANUAL_BATCH_CURRENT_IMAGE_SOURCE = "batch_confirmed_current_image"
 MANUAL_BATCH_SELECTED_IMAGES_SOURCE = "batch_confirmed_selected_images"
 MANUAL_BATCH_ALL_IMAGES_SOURCE = "batch_confirmed_all_images"
+MANUAL_ACTUAL_OVERRIDE_SOURCE = "manual_actual_override"
 MANUAL_INSTRUMENT_NAME = "裂缝宽度观测仪"
 MANUAL_INSTRUMENT_MODEL = "HC-CK101"
 MANUAL_INSTRUMENT_MANUFACTURER = "北京海创高科技有限公司"
@@ -67,6 +68,21 @@ POINT_FIELDS = [
     "selection_reason",
     "replacement_from_target_px",
     "point_config_source",
+    "actual_override_source",
+    "actual_override_distance_px",
+    "original_actual_position_pct",
+    "original_x_px",
+    "original_y_px",
+    "original_left_x_px",
+    "original_left_y_px",
+    "original_right_x_px",
+    "original_right_y_px",
+    "original_auto_width_mm",
+    "original_auto_width_px",
+    "original_mask_width_mm",
+    "original_contrast",
+    "original_threshold",
+    "original_selection_reason",
     "review_usable",
     "exclude_reason",
     "image_deleted",
@@ -871,6 +887,9 @@ def create_point_excel(csv_path: Path, xlsx_path: Path) -> Path:
         ["target_search_radius_px", "围绕人工配置测点搜索有效裂缝剖面的半径，单位 px"],
         ["auto_width_mm", "该测点程序自动识别宽度"],
         ["point_config_source", "sensor_point_config 表示按传感器人工配置取点；auto_fraction 表示自动等距取点"],
+        ["actual_override_source", "manual_actual_override 表示该图该测点的实际测宽剖面曾由人工点击调整"],
+        ["actual_override_distance_px", "人工点击位置与吸附到的有效法向剖面中心距离，单位 px"],
+        ["original_*", "人工调整实际测点前保留的原自动测点坐标、宽度和选点原因，用于追溯或恢复"],
         ["image_deleted", "图片级软删除标记；1 表示该图不参与指标统计，原图文件不物理删除"],
         ["delete_reason", "图片级删除原因"],
         ["manual_width_mm", "人工在同一编号测点读取的缝宽，单位 mm；默认按程序值预填并保留 2 位小数"],
@@ -1071,6 +1090,7 @@ def evaluate_points_file(input_path: Path, out_dir: Path, abs_tol_mm: float, rel
             "point_order": row.get("point_order", ""),
             "target_position_pct": row.get("target_position_pct", ""),
             "actual_position_pct": row.get("actual_position_pct", ""),
+            "actual_override_source": row.get("actual_override_source", ""),
             "sn": row.get("sn", ""),
             "device_name": row.get("device_name", ""),
             "uptime": row.get("uptime", ""),
@@ -1098,6 +1118,7 @@ def evaluate_points_file(input_path: Path, out_dir: Path, abs_tol_mm: float, rel
         "point_order",
         "target_position_pct",
         "actual_position_pct",
+        "actual_override_source",
         "sn",
         "device_name",
         "uptime",
