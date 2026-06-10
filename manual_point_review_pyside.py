@@ -9,7 +9,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -115,6 +115,9 @@ def is_auto_derived_manual_source(source: Any) -> bool:
     return str(source or "").strip() in AUTO_DERIVED_MANUAL_SOURCES
 
 
+ACTUAL_SNAP_MAX_DISTANCE_PX = 120.0
+
+
 class ImageLabel(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -162,6 +165,7 @@ class ManualPointReviewWindow(QMainWindow):
         self.refreshing = False
         self.thumbnail_refreshing = False
         self.thumbnail_cache: dict[str, QIcon] = {}
+        self.profile_cache: dict[str, tuple[list[dict[str, str]], list[dict[str, Any]]]] = {}
         self.loaded_manual_value = ""
         self.loaded_status_value = ""
         self.display_scale = 1.0
@@ -189,8 +193,8 @@ class ManualPointReviewWindow(QMainWindow):
         self.save_button = QPushButton("保存 CSV")
         self.export_button = QPushButton("导出 Excel")
         self.eval_button = QPushButton("计算指标")
-        self.prev_image_button = QPushButton("上一图")
-        self.next_image_button = QPushButton("下一图")
+        self.prev_image_button = QPushButton("上一图 A/←")
+        self.next_image_button = QPushButton("下一图 D/→")
         self.first_unfilled_button = QPushButton("首个未填")
         self.config_mode_button = QPushButton("设置测点")
         self.config_mode_button.setCheckable(True)
@@ -278,8 +282,8 @@ class ManualPointReviewWindow(QMainWindow):
         self.confirm_current_image_button = QPushButton("确认当前图")
         self.confirm_selected_images_button = QPushButton("确认选中图")
         self.confirm_all_images_button = QPushButton("确认全部图")
-        self.prev_point_button = QPushButton("上一测点")
-        self.next_point_button = QPushButton("下一测点")
+        self.prev_point_button = QPushButton("上一测点 W/↑")
+        self.next_point_button = QPushButton("下一测点 S/↓")
         action_row1.addWidget(self.save_current_button)
         action_row1.addWidget(self.skip_button)
         action_row1.addWidget(self.restore_actual_button)
@@ -293,6 +297,12 @@ class ManualPointReviewWindow(QMainWindow):
         panel_layout.addLayout(action_row1)
         panel_layout.addLayout(action_row2)
         panel_layout.addLayout(action_row3)
+
+        self.shortcut_label = QLabel(
+            f"快捷键：A/D 或 ←/→ 切图，W/S 或 ↑/↓ 切测点；调整实际点时只可吸附绿色候选区域（≤{ACTUAL_SNAP_MAX_DISTANCE_PX:.0f}px）。"
+        )
+        self.shortcut_label.setWordWrap(True)
+        panel_layout.addWidget(self.shortcut_label)
 
         self.path_label = QLabel()
         self.path_label.setWordWrap(True)
@@ -330,6 +340,7 @@ class ManualPointReviewWindow(QMainWindow):
         self.next_point_button.clicked.connect(self.next_point)
         self.table.itemSelectionChanged.connect(self.on_table_selection)
         self.thumbnail_list.currentRowChanged.connect(self.on_thumbnail_selected)
+        self.register_shortcuts()
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -349,6 +360,41 @@ class ManualPointReviewWindow(QMainWindow):
             }
             """
         )
+
+    def register_shortcuts(self) -> None:
+        shortcuts = [
+            ("A", self.prev_image),
+            ("Left", self.prev_image),
+            ("D", self.next_image),
+            ("Right", self.next_image),
+            ("W", self.prev_point),
+            ("Up", self.prev_point),
+            ("S", self.next_point),
+            ("Down", self.next_point),
+        ]
+        self.navigation_shortcuts = []
+        for key, callback in shortcuts:
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda cb=callback: self.run_navigation_shortcut(cb))
+            self.navigation_shortcuts.append(shortcut)
+
+    def navigation_shortcut_allowed(self) -> bool:
+        focus = QApplication.focusWidget()
+        if focus is None:
+            return True
+        blocked = {
+            self.manual_edit,
+            self.note_edit,
+            self.status_combo,
+            self.thumbnail_list,
+            self.table,
+        }
+        return not any(focus is widget or widget.isAncestorOf(focus) for widget in blocked)
+
+    def run_navigation_shortcut(self, callback) -> None:
+        if self.navigation_shortcut_allowed():
+            callback()
 
     def _read_point_config_rows(self) -> list[dict[str, Any]]:
         rows = read_csv_rows(self.config_path)
@@ -399,18 +445,29 @@ class ManualPointReviewWindow(QMainWindow):
         for current_field, original_field in ORIGINAL_ACTUAL_FIELD_MAP:
             row[original_field] = row.get(current_field, "")
 
-    def nearest_profile_point(self, x_px: float, y_px: float) -> tuple[dict[str, Any] | None, list[dict[str, str]], float | None, str]:
+    def current_profile_rows(self) -> tuple[list[dict[str, str]], list[dict[str, Any]], str]:
         row = self.current_row()
         profile_path = Path(str(row.get("profile_csv_path") or ""))
         if not profile_path.exists():
-            return None, [], None, f"找不到剖面文件：{profile_path}"
+            return [], [], f"找不到剖面文件：{profile_path}"
+        cache_key = str(profile_path)
+        if cache_key in self.profile_cache:
+            raw_rows, candidates = self.profile_cache[cache_key]
+            return raw_rows, candidates, ""
         try:
             raw_rows = read_csv_rows(profile_path)
         except Exception as exc:
-            return None, [], None, f"剖面文件读取失败：{exc}"
+            return [], [], f"剖面文件读取失败：{exc}"
         candidates = valid_profile_rows(raw_rows)
         if not candidates:
-            return None, raw_rows, None, "剖面文件中没有可用测宽点。"
+            return raw_rows, candidates, "剖面文件中没有可用测宽点。"
+        self.profile_cache[cache_key] = (raw_rows, candidates)
+        return raw_rows, candidates, ""
+
+    def nearest_profile_point(self, x_px: float, y_px: float) -> tuple[dict[str, Any] | None, list[dict[str, str]], float | None, str]:
+        raw_rows, candidates, error = self.current_profile_rows()
+        if error:
+            return None, raw_rows, None, error
         nearest = min(
             candidates,
             key=lambda item: (
@@ -419,7 +476,31 @@ class ManualPointReviewWindow(QMainWindow):
             ),
         )
         distance = math.hypot(float(nearest["_x"]) - x_px, float(nearest["_y"]) - y_px)
+        if distance > ACTUAL_SNAP_MAX_DISTANCE_PX:
+            return (
+                nearest,
+                raw_rows,
+                distance,
+                f"点击点距最近有效测宽剖面 {distance:.1f} px，超过 {ACTUAL_SNAP_MAX_DISTANCE_PX:.0f} px；"
+                "请点击绿色可吸附区域附近。",
+            )
         return nearest, raw_rows, distance, ""
+
+    def current_target_xy(self) -> tuple[float | None, float | None]:
+        row = self.current_row()
+        tx = to_float(row.get("target_x_px"))
+        ty = to_float(row.get("target_y_px"))
+        if tx is not None and ty is not None:
+            return tx, ty
+        selected_order = int(to_float(row.get("point_order")) or 0)
+        for config in self.current_sensor_config_rows():
+            if int(to_float(config.get("point_order")) or 0) != selected_order:
+                continue
+            tx = to_float(config.get("target_x_px"))
+            ty = to_float(config.get("target_y_px"))
+            if tx is not None and ty is not None:
+                return tx, ty
+        return None, None
 
     def apply_actual_profile_point(self, row: dict[str, Any], profile_point: dict[str, Any], profile_rows: list[dict[str, str]], distance_px: float) -> None:
         self.store_original_actual_point(row)
@@ -758,6 +839,7 @@ class ManualPointReviewWindow(QMainWindow):
         self.point_config_rows = self._read_point_config_rows() if self.config_path.exists() else infer_point_config_from_points(self.rows)
         self.rebuild_index()
         self.thumbnail_cache.clear()
+        self.profile_cache.clear()
         self.image_pos = 0
         self.point_pos = 0
         self.dirty = False
@@ -923,7 +1005,8 @@ class ManualPointReviewWindow(QMainWindow):
                 self.config_mode_button.blockSignals(False)
             row = self.current_row()
             self.status_label.setText(
-                f"实际点调整模式：当前为 P{row.get('point_order')}。请点击裂缝上希望测宽的位置，程序会吸附到最近有效法向剖面。"
+                f"实际点调整模式：当前为 P{row.get('point_order')}。绿色区域为可吸附范围；"
+                f"点击点距最近有效剖面不得超过 {ACTUAL_SNAP_MAX_DISTANCE_PX:.0f} px。"
             )
         else:
             self.status_label.setText("已退出实际点调整模式。")
@@ -984,6 +1067,56 @@ class ManualPointReviewWindow(QMainWindow):
         self.draw_image()
         self.refresh_current_thumbnail()
 
+    def draw_actual_snap_overlay(self, display: Image.Image, scale: float) -> None:
+        if not self.actual_mode_button.isChecked():
+            return
+        _raw_rows, candidates, _error = self.current_profile_rows()
+        if not candidates:
+            return
+        points = [(float(row["_x"]) * scale, float(row["_y"]) * scale) for row in candidates]
+        if not points:
+            return
+        overlay = Image.new("RGBA", display.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        band_width = max(12, int(ACTUAL_SNAP_MAX_DISTANCE_PX * scale * 2.0))
+        path_width = max(2, int(4 * scale))
+        if len(points) >= 2:
+            overlay_draw.line(points, fill=(40, 190, 90, 35), width=band_width, joint="curve")
+            overlay_draw.line(points, fill=(16, 150, 70, 215), width=path_width, joint="curve")
+        step = max(1, len(points) // 160)
+        dot_radius = max(2, int(3 * scale))
+        for x, y in points[::step]:
+            overlay_draw.ellipse(
+                (x - dot_radius, y - dot_radius, x + dot_radius, y + dot_radius),
+                fill=(25, 190, 85, 235),
+                outline=(0, 80, 35, 235),
+            )
+        tx, ty = self.current_target_xy()
+        if tx is not None and ty is not None:
+            target_x = float(tx) * scale
+            target_y = float(ty) * scale
+            radius = ACTUAL_SNAP_MAX_DISTANCE_PX * scale
+            near_target = any(
+                math.hypot(float(row["_x"]) - float(tx), float(row["_y"]) - float(ty)) <= ACTUAL_SNAP_MAX_DISTANCE_PX
+                for row in candidates
+            )
+            color = (35, 170, 80, 210) if near_target else (214, 40, 40, 230)
+            overlay_draw.ellipse(
+                (target_x - radius, target_y - radius, target_x + radius, target_y + radius),
+                outline=color,
+                width=max(2, int(3 * scale)),
+            )
+            if not near_target:
+                overlay_draw.text(
+                    (target_x + 12, target_y + 12),
+                    "目标附近无有效剖面",
+                    fill=(214, 40, 40, 245),
+                    font=ui_font(14),
+                    stroke_width=2,
+                    stroke_fill=(255, 255, 255, 230),
+                )
+        display.alpha_composite(overlay)
+
     def save_point_config(self) -> None:
         write_point_config(self.config_path, self.point_config_rows)
         self.config_dirty = False
@@ -1027,6 +1160,7 @@ class ManualPointReviewWindow(QMainWindow):
         self.rows = normalize_point_rows(read_csv_rows(self.csv_path))
         self.rebuild_index()
         self.thumbnail_cache.clear()
+        self.profile_cache.clear()
         self.image_pos = 0
         self.point_pos = 0
         self.dirty = False
@@ -1053,13 +1187,15 @@ class ManualPointReviewWindow(QMainWindow):
         self.current_image_size = (image.width, image.height)
         display_size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
         self.display_size = display_size
-        display = image.resize(display_size)
+        display = image.resize(display_size).convert("RGBA")
+        self.draw_actual_snap_overlay(display, scale)
         draw = ImageDraw.Draw(display)
         font = ui_font(15)
         if self.image_deleted():
             draw.rectangle((0, 0, 210, 30), fill="#b00020")
             draw.text((10, 8), "SOFT DELETED", fill="white", font=font)
-        draw.rectangle((6, 6, 330, 88), fill=(255, 255, 255), outline="#d0d0d0")
+        legend_bottom = 114 if self.actual_mode_button.isChecked() else 88
+        draw.rectangle((6, 6, 430, legend_bottom), fill=(255, 255, 255), outline="#d0d0d0")
         draw.line((18, 24, 42, 24), fill="#d62828", width=4)
         draw.text((50, 16), "程序实际法向测宽短线", fill="#222222", font=font)
         target_color = "#ffe600"
@@ -1071,6 +1207,9 @@ class ManualPointReviewWindow(QMainWindow):
         draw.text((50, 42), "人工固定目标点", fill="#222222", font=font)
         draw.line((18, 76, 42, 76), fill="#f77f00", width=4)
         draw.text((50, 68), "人工调整实际测点", fill="#222222", font=font)
+        if self.actual_mode_button.isChecked():
+            draw.line((18, 102, 42, 102), fill="#109646", width=5)
+            draw.text((50, 94), f"绿色区域可吸附（≤{ACTUAL_SNAP_MAX_DISTANCE_PX:.0f}px）", fill="#222222", font=font)
         selected_order = int(to_float(row.get("point_order")) or 0)
         for config in self.current_sensor_config_rows():
             tx = to_float(config.get("target_x_px"))
