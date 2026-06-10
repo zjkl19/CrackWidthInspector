@@ -3,10 +3,13 @@
 from pathlib import Path
 
 project_root = Path(SPEC).resolve().parent
-datas = [(str(project_root / "models"), "models")]
+datas = [
+    (str(project_root / "models"), "models"),
+    (str(project_root / "assets"), "assets"),
+]
 
 a = Analysis(
-    ["crack_width_inspector_gui.py"],
+    ["crack_width_workbench.py"],
     pathex=[str(project_root)],
     binaries=[],
     datas=datas,
@@ -32,6 +35,7 @@ exe = EXE(
     upx=True,
     console=False,
     disable_windowed_traceback=False,
+    icon=str(project_root / "assets" / "crack_width_manual_review.ico"),
 )
 
 coll = COLLECT(

@@ -1,8 +1,8 @@
 # Crack Width Inspector / 裂缝宽度检测系统
 
-`Crack Width Inspector` 是一个面向 Windows 的混凝土裂缝宽度检测项目。它采用“传统图像处理 + 预训练 HED 边缘先验”的混合方案，对裂缝图像进行自动分割、骨架提取、宽度估计和结果导出。当前项目同时提供命令行处理方式和适合客户交付的 `PySide6` 桌面界面。
+`Crack Width Inspector` 是一个面向 Windows 的混凝土裂缝宽度检测项目。它采用“传统图像处理 + 预训练 HED 边缘先验”的混合方案，对裂缝图像进行自动分割、骨架提取、宽度估计、人工复核和结果导出。当前项目同时提供命令行处理方式和适合客户交付的 `PySide6` 统一工作台。
 
-`Crack Width Inspector` is a Windows-oriented crack measurement tool for concrete surface images. It combines classical image processing with a pre-trained HED edge prior, then estimates crack width from the skeleton and distance transform. The project now provides both a command-line workflow and a customer-facing `PySide6` desktop GUI.
+`Crack Width Inspector` is a Windows-oriented crack measurement tool for concrete surface images. It combines classical image processing with a pre-trained HED edge prior, then estimates crack width from the skeleton and distance transform. The project now provides both a command-line workflow and a customer-facing `PySide6` workbench for automatic inspection and manual review.
 
 ## 中文说明
 
@@ -12,7 +12,7 @@
 - 支持 HED 深度边缘先验，降低复杂背景误检
 - 支持单张图片或文件夹批处理
 - 导出掩膜图、骨架图、叠加标注图和 CSV 数据表
-- 提供适合交付客户使用的桌面 GUI
+- 提供适合交付客户使用的统一桌面工作台，包含“自动识别”和“人工复核与指标”两个页签
 - 支持 `PyInstaller` 目录版 Windows 打包
 
 ### 项目结构
@@ -21,6 +21,8 @@
 CrackWidthInspector/
 |-- crack_width_inspector.py        # 核心处理逻辑 + CLI 入口
 |-- crack_width_inspector_gui.py    # PySide6 桌面 GUI
+|-- crack_width_workbench.py        # 统一工作台入口：自动识别 + 人工复核
+|-- manual_point_review_pyside.py   # 人工复核页签/独立备用入口
 |-- CrackWidthInspector.spec        # PyInstaller 打包配置
 |-- build_exe.ps1                   # 打包脚本
 |-- requirements.txt                # Python 依赖
@@ -79,16 +81,22 @@ python .\crack_width_inspector.py --input .\images --out-dir .\outputs --scale 0
 ### GUI 运行
 
 ```powershell
-python .\crack_width_inspector_gui.py
+python .\crack_width_workbench.py
 ```
 
 GUI 使用流程：
 
-1. 选择单张裂缝图像或一个图片文件夹。
-2. 选择结果输出目录。
-3. 设置 `标定系数 (mm/px)` 和 `采样点数`。
-4. 点击“开始检测”。
-5. 在界面中查看结果总览、叠加图预览、关键统计和运行日志。
+1. 在“自动识别”页签中选择单张裂缝图像或一个图片文件夹。
+2. 选择结果输出目录，设置 `标定系数 (mm/px)` 和 `采样点数`，点击“开始检测”。
+3. 在“人工复核与指标”页签中打开或使用默认 `manual_point_review_points.csv`。
+4. 查看缩略图、调整测点、填写或确认人工宽度，并导出 Excel 或计算评价指标。
+
+旧的独立入口仍保留为备用：
+
+```powershell
+python .\crack_width_inspector_gui.py
+python .\manual_point_review_gui_launcher.py
+```
 
 ### 输出文件说明
 
@@ -148,7 +156,7 @@ release\CrackWidthInspector-v1.0.0-win64.zip
 - Optional HED deep edge prior to suppress background noise
 - Supports both single-image and batch folder processing
 - Exports masks, skeletons, overlays, and CSV tables
-- Customer-facing desktop GUI built with `PySide6`
+- Customer-facing `PySide6` workbench with automatic inspection and manual-review tabs
 - Windows packaging via `PyInstaller` directory mode
 
 ### Project Structure
@@ -157,6 +165,8 @@ release\CrackWidthInspector-v1.0.0-win64.zip
 CrackWidthInspector/
 |-- crack_width_inspector.py
 |-- crack_width_inspector_gui.py
+|-- crack_width_workbench.py
+|-- manual_point_review_pyside.py
 |-- CrackWidthInspector.spec
 |-- build_exe.ps1
 |-- requirements.txt
@@ -193,8 +203,10 @@ python .\crack_width_inspector.py --input .\crack.jpeg --out-dir .\outputs
 ### GUI Usage
 
 ```powershell
-python .\crack_width_inspector_gui.py
+python .\crack_width_workbench.py
 ```
+
+The unified workbench contains two tabs: automatic inspection and point-level manual review. The standalone GUI launchers remain available as backup entry points.
 
 ### Build EXE
 
