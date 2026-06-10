@@ -902,10 +902,13 @@ class ManualPointReviewWindow(QMainWindow):
         draw.rectangle((6, 6, 310, 62), fill=(255, 255, 255), outline="#d0d0d0")
         draw.line((18, 24, 42, 24), fill="#d62828", width=4)
         draw.text((50, 16), "程序实际法向测宽短线", fill="#222222", font=font)
-        draw.line((24, 42, 24, 58), fill="#7a3cff", width=3)
-        draw.line((16, 50, 32, 50), fill="#7a3cff", width=3)
+        target_color = "#ffe600"
+        target_outline = "#101010"
+        draw.line((24, 42, 24, 58), fill=target_outline, width=6)
+        draw.line((16, 50, 32, 50), fill=target_outline, width=6)
+        draw.line((24, 42, 24, 58), fill=target_color, width=3)
+        draw.line((16, 50, 32, 50), fill=target_color, width=3)
         draw.text((50, 42), "人工固定目标点", fill="#222222", font=font)
-        target_color = "#7a3cff"
         selected_order = int(to_float(row.get("point_order")) or 0)
         for config in self.current_sensor_config_rows():
             tx = to_float(config.get("target_x_px"))
@@ -917,11 +920,22 @@ class ManualPointReviewWindow(QMainWindow):
             order = int(to_float(config.get("point_order")) or 0)
             cross = 18 if order == selected_order else 14
             width = 4 if order == selected_order else 3
+            outline_width = width + 4
+            draw.line((x - cross, y, x + cross, y), fill=target_outline, width=outline_width)
+            draw.line((x, y - cross, x, y + cross), fill=target_outline, width=outline_width)
             draw.line((x - cross, y, x + cross, y), fill=target_color, width=width)
             draw.line((x, y - cross, x, y + cross), fill=target_color, width=width)
+            draw.rectangle((x - 5, y - 5, x + 5, y + 5), fill=target_outline)
             draw.rectangle((x - 3, y - 3, x + 3, y + 3), fill=target_color)
             label = str(config.get("point_name") or f"P{config.get('point_order')}")
-            draw.text((x + cross + 4, y - 26), f"{label}目标", fill=target_color, font=font)
+            draw.text(
+                (x + cross + 4, y - 26),
+                f"{label}目标",
+                fill=target_color,
+                font=font,
+                stroke_width=2,
+                stroke_fill=target_outline,
+            )
         current_idx = self.current_row_index()
         for idx in self.current_indices():
             point = self.rows[idx]
